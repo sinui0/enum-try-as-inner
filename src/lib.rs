@@ -5,91 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-//! # enum-as-inner
-//!
-//! A deriving proc-macro for generating functions to automatically give access to the inner members of enum.
-//!
-//! ## Basic unnamed field case
-//!
-//! The basic case is meant for single item enums, like:
-//!
-//! ```rust
-//! use enum_as_inner::EnumAsInner;
-//!
-//! #[derive(Debug, EnumAsInner)]
-//! enum OneEnum {
-//!     One(u32),
-//! }
-//!
-//! let one = OneEnum::One(1);
-//!
-//! assert_eq!(*one.as_one().unwrap(), 1);
-//! assert_eq!(one.into_one().unwrap(), 1);
-//! ```
-//!
-//! where the result is either a reference for inner items or a tuple containing the inner items.
-//!
-//! ## Unit case
-//!
-//! This will return true if enum's variant matches the expected type
-//!
-//! ```rust
-//! use enum_as_inner::EnumAsInner;
-//!
-//! #[derive(EnumAsInner)]
-//! enum UnitVariants {
-//!     Zero,
-//!     One,
-//!     Two,
-//! }
-//!
-//! let unit = UnitVariants::Two;
-//!
-//! assert!(unit.is_two());
-//! ```
-//!
-//! ## Mutliple, unnamed field case
-//!
-//! This will return a tuple of the inner types:
-//!
-//! ```rust
-//! use enum_as_inner::EnumAsInner;
-//!
-//! #[derive(Debug, EnumAsInner)]
-//! enum ManyVariants {
-//!     One(u32),
-//!     Two(u32, i32),
-//!     Three(bool, u32, i64),
-//! }
-//!
-//! let many = ManyVariants::Three(true, 1, 2);
-//!
-//! assert!(many.is_three());
-//! assert_eq!(many.as_three().unwrap(), (&true, &1_u32, &2_i64));
-//! assert_eq!(many.into_three().unwrap(), (true, 1_u32, 2_i64));
-//! ```
-//!
-//! ## Multiple, named field case
-//!
-//! This will return a tuple of the inner types, like the unnamed option:
-//!
-//! ```rust
-//! use enum_as_inner::EnumAsInner;
-//!
-//! #[derive(Debug, EnumAsInner)]
-//! enum ManyVariants {
-//!     One { one: u32 },
-//!     Two { one: u32, two: i32 },
-//!     Three { one: bool, two: u32, three: i64 },
-//! }
-//!
-//! let many = ManyVariants::Three { one: true, two: 1, three: 2 };
-//!
-//! assert!(many.is_three());
-//! assert_eq!(many.as_three().unwrap(), (&true, &1_u32, &2_i64));
-//! assert_eq!(many.into_three().unwrap(), (true, 1_u32, 2_i64));
-//! ```
-
+#![doc = include_str!("../README.md")]
 #![warn(
     clippy::default_trait_access,
     clippy::dbg_macro,
@@ -107,22 +23,66 @@
 use heck::ToSnakeCase;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput};
+use syn::{parse_macro_input, DataEnum, DeriveInput, Visibility};
 
 /// returns first the types to return, the match names, and then tokens to the field accesses
-fn unit_fields_return(variant_name: &syn::Ident, function_name: &Ident, doc: &str) -> TokenStream {
+fn unit_fields_return(
+    variant_name: &syn::Ident,
+    err_name: &syn::Ident,
+    ty_generics: &syn::TypeGenerics<'_>,
+    (function_name_is, doc_is): (&Ident, &str),
+    (function_name_ref, doc_ref): (&Ident, &str),
+    (function_name_val, doc_val): (&Ident, &str),
+) -> TokenStream {
     quote!(
-        #[doc = #doc]
+        #[doc = #doc_is]
         #[inline]
-        pub fn #function_name(&self) -> bool {
+        pub fn #function_name_is(&self) -> bool {
             matches!(self, Self::#variant_name)
+        }
+
+        #[doc = #doc_ref ]
+        #[inline]
+        pub fn #function_name_ref(&self) -> ::core::result::Result<&(), #err_name #ty_generics> {
+            match self {
+                Self::#variant_name => {
+                    ::core::result::Result::Ok(&())
+                }
+                _ => {
+                    ::core::result::Result::Err(#err_name::new(
+                        stringify!(#variant_name),
+                        self.variant_name(),
+                        ::core::option::Option::None,
+                    ))
+                }
+            }
+        }
+
+        #[doc = #doc_val ]
+        #[inline]
+        pub fn #function_name_val(self) -> ::core::result::Result<(), #err_name #ty_generics> {
+            match self {
+                Self::#variant_name => {
+                    ::core::result::Result::Ok(())
+                }
+                _ => {
+                    ::core::result::Result::Err(#err_name::new(
+                        stringify!(#variant_name),
+                        self.variant_name(),
+                        ::core::option::Option::Some(self),
+                    ))
+                }
+            }
         }
     )
 }
 
 /// returns first the types to return, the match names, and then tokens to the field accesses
+#[allow(clippy::too_many_arguments)]
 fn unnamed_fields_return(
     variant_name: &syn::Ident,
+    err_name: &syn::Ident,
+    ty_generics: &syn::TypeGenerics<'_>,
     (function_name_is, doc_is): (&Ident, &str),
     (function_name_mut_ref, doc_mut_ref): (&Ident, &str),
     (function_name_ref, doc_ref): (&Ident, &str),
@@ -176,42 +136,63 @@ fn unnamed_fields_return(
 
         #[doc = #doc_mut_ref ]
         #[inline]
-        pub fn #function_name_mut_ref(&mut self) -> ::core::option::Option<#returns_mut_ref> {
+        pub fn #function_name_mut_ref(&mut self) -> ::core::result::Result<#returns_mut_ref, #err_name #ty_generics> {
             match self {
                 Self::#variant_name(#matches) => {
-                    ::core::option::Option::Some((#matches))
+                    ::core::result::Result::Ok((#matches))
                 }
-                _ => ::core::option::Option::None
+                _ => {
+                    ::core::result::Result::Err(#err_name::new(
+                        stringify!(#variant_name),
+                        self.variant_name(),
+                        ::core::option::Option::None,
+                    ))
+                }
             }
         }
 
         #[doc = #doc_ref ]
         #[inline]
-        pub fn #function_name_ref(&self) -> ::core::option::Option<#returns_ref> {
+        pub fn #function_name_ref(&self) -> ::core::result::Result<#returns_ref, #err_name #ty_generics> {
             match self {
                 Self::#variant_name(#matches) => {
-                    ::core::option::Option::Some((#matches))
+                    ::core::result::Result::Ok((#matches))
                 }
-                _ => ::core::option::Option::None
+                _ => {
+                    ::core::result::Result::Err(#err_name::new(
+                        stringify!(#variant_name),
+                        self.variant_name(),
+                        ::core::option::Option::None,
+                    ))
+                }
             }
         }
 
         #[doc = #doc_val ]
         #[inline]
-        pub fn #function_name_val(self) -> ::core::result::Result<#returns_val, Self> {
+        pub fn #function_name_val(self) -> ::core::result::Result<#returns_val, #err_name #ty_generics> {
             match self {
                 Self::#variant_name(#matches) => {
                     ::core::result::Result::Ok((#matches))
-                },
-                _ => ::core::result::Result::Err(self)
+                }
+                _ => {
+                    ::core::result::Result::Err(#err_name::new(
+                        stringify!(#variant_name),
+                        self.variant_name(),
+                        ::core::option::Option::Some(self),
+                    ))
+                }
             }
         }
     )
 }
 
 /// returns first the types to return, the match names, and then tokens to the field accesses
+#[allow(clippy::too_many_arguments)]
 fn named_fields_return(
     variant_name: &syn::Ident,
+    err_name: &syn::Ident,
+    ty_generics: &syn::TypeGenerics<'_>,
     (function_name_is, doc_is): (&Ident, &str),
     (function_name_mut_ref, doc_mut_ref): (&Ident, &str),
     (function_name_ref, doc_ref): (&Ident, &str),
@@ -267,74 +248,90 @@ fn named_fields_return(
 
         #[doc = #doc_mut_ref ]
         #[inline]
-        pub fn #function_name_mut_ref(&mut self) -> ::core::option::Option<#returns_mut_ref> {
+        pub fn #function_name_mut_ref(&mut self) -> ::core::result::Result<#returns_mut_ref, #err_name #ty_generics> {
             match self {
                 Self::#variant_name{ #matches } => {
-                    ::core::option::Option::Some((#matches))
+                    ::core::result::Result::Ok((#matches))
                 }
-                _ => ::core::option::Option::None
+                _ => {
+                    ::core::result::Result::Err(#err_name::new(
+                        stringify!(#variant_name),
+                        self.variant_name(),
+                        ::core::option::Option::None,
+                    ))
+                }
             }
         }
 
         #[doc = #doc_ref ]
         #[inline]
-        pub fn #function_name_ref(&self) -> ::core::option::Option<#returns_ref> {
+        pub fn #function_name_ref(&self) -> ::core::result::Result<#returns_ref, #err_name #ty_generics> {
             match self {
                 Self::#variant_name{ #matches } => {
-                    ::core::option::Option::Some((#matches))
+                    ::core::result::Result::Ok((#matches))
                 }
-                _ => ::core::option::Option::None
+                _ => {
+                    ::core::result::Result::Err(#err_name::new(
+                        stringify!(#variant_name),
+                        self.variant_name(),
+                        ::core::option::Option::None,
+                    ))
+                }
             }
         }
 
         #[doc = #doc_val ]
         #[inline]
-        pub fn #function_name_val(self) -> ::core::result::Result<#returns_val, Self> {
+        pub fn #function_name_val(self) -> ::core::result::Result<#returns_val, #err_name #ty_generics> {
             match self {
                 Self::#variant_name{ #matches } => {
                     ::core::result::Result::Ok((#matches))
                 }
-                _ => ::core::result::Result::Err(self)
+                _ => {
+                    ::core::result::Result::Err(#err_name::new(
+                        stringify!(#variant_name),
+                        self.variant_name(),
+                        ::core::option::Option::Some(self),
+                    ))
+                }
             }
         }
     )
 }
 
-fn impl_all_as_fns(ast: &DeriveInput) -> TokenStream {
-    let name = &ast.ident;
-    let generics = &ast.generics;
-
-    let enum_data = if let syn::Data::Enum(data) = &ast.data {
-        data
-    } else {
-        panic!("{} is not an enum", name);
-    };
+fn impl_all_as_fns(
+    name: &Ident,
+    err_name: &Ident,
+    generics: &syn::Generics,
+    data: &DataEnum,
+) -> TokenStream {
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let mut stream = TokenStream::new();
-
-    for variant_data in &enum_data.variants {
+    let mut variant_names = TokenStream::new();
+    for variant_data in &data.variants {
         let variant_name = &variant_data.ident;
         let function_name_ref = Ident::new(
-            &format!("as_{}", variant_name).to_snake_case(),
+            &format!("try_as_{}", variant_name).to_snake_case(),
             Span::call_site(),
         );
         let doc_ref = format!(
-            "Optionally returns references to the inner fields if this is a `{}::{}`, otherwise `None`",
-            name,
-            variant_name,
+            "Returns references to the inner fields if this is a `{}::{}`, otherwise an `{}`",
+            name, variant_name, &err_name,
         );
         let function_name_mut_ref = Ident::new(
-            &format!("as_{}_mut", variant_name).to_snake_case(),
+            &format!("try_as_{}_mut", variant_name).to_snake_case(),
             Span::call_site(),
         );
         let doc_mut_ref = format!(
-            "Optionally returns mutable references to the inner fields if this is a `{}::{}`, otherwise `None`",
+            "Returns mutable references to the inner fields if this is a `{}::{}`, otherwise an `{}`",
             name,
             variant_name,
+            &err_name,
         );
 
         let function_name_val = Ident::new(
-            &format!("into_{}", variant_name).to_snake_case(),
+            &format!("try_into_{}", variant_name).to_snake_case(),
             Span::call_site(),
         );
         let doc_val = format!(
@@ -353,9 +350,18 @@ fn impl_all_as_fns(ast: &DeriveInput) -> TokenStream {
         );
 
         let tokens = match &variant_data.fields {
-            syn::Fields::Unit => unit_fields_return(variant_name, &function_name_is, &doc_is),
+            syn::Fields::Unit => unit_fields_return(
+                variant_name,
+                err_name,
+                &ty_generics,
+                (&function_name_is, &doc_is),
+                (&function_name_ref, &doc_ref),
+                (&function_name_val, &doc_val),
+            ),
             syn::Fields::Unnamed(unnamed) => unnamed_fields_return(
                 variant_name,
+                err_name,
+                &ty_generics,
                 (&function_name_is, &doc_is),
                 (&function_name_mut_ref, &doc_mut_ref),
                 (&function_name_ref, &doc_ref),
@@ -364,6 +370,8 @@ fn impl_all_as_fns(ast: &DeriveInput) -> TokenStream {
             ),
             syn::Fields::Named(named) => named_fields_return(
                 variant_name,
+                err_name,
+                &ty_generics,
                 (&function_name_is, &doc_is),
                 (&function_name_mut_ref, &doc_mut_ref),
                 (&function_name_ref, &doc_ref),
@@ -373,26 +381,201 @@ fn impl_all_as_fns(ast: &DeriveInput) -> TokenStream {
         };
 
         stream.extend(tokens);
-    }
 
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+        let variant_name = match &variant_data.fields {
+            syn::Fields::Unit => quote!(Self::#variant_name => stringify!(#variant_name),),
+            syn::Fields::Unnamed(_) => {
+                quote!(Self::#variant_name(..) => stringify!(#variant_name),)
+            }
+            syn::Fields::Named(_) => quote!(Self::#variant_name{..} => stringify!(#variant_name),),
+        };
+
+        variant_names.extend(variant_name);
+    }
 
     quote!(
         impl #impl_generics #name #ty_generics #where_clause {
             #stream
+
+            /// Returns the name of the variant.
+            fn variant_name(&self) -> &'static str {
+                match self {
+                    #variant_names
+                    _ => unreachable!(),
+                }
+            }
         }
     )
 }
 
+fn impl_err(
+    name: &Ident,
+    err_name: &Ident,
+    vis: &Visibility,
+    generics: &syn::Generics,
+    attrs: &[syn::Attribute],
+) -> TokenStream {
+    let doc_err = format!("An error type for the `{}::try_as_*` functions", name);
+
+    // get the derives for the error type
+    let mut derives = Vec::new();
+    let mut derive_debug = false;
+    for attr in attrs {
+        if attr.path().is_ident("derive_err") {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("Debug") {
+                    derive_debug = true;
+                } else {
+                    derives.push(meta.path);
+                }
+
+                Ok(())
+            })
+            .expect("failed to parse derive nested meta");
+        }
+    }
+
+    let derive_err = if derives.is_empty() {
+        quote!()
+    } else {
+        quote!(#[derive(#(#derives),*)])
+    };
+
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let mut err_impl = quote!(
+        #[doc = #doc_err ]
+        #derive_err
+        #vis struct #err_name #generics {
+            expected: &'static str,
+            actual: &'static str,
+            value: ::core::option::Option<#name #ty_generics>,
+        }
+
+        impl #impl_generics #err_name #ty_generics #where_clause {
+            /// Creates a new error indicating the expected variant and the actual variant.
+            fn new(
+                expected: &'static str,
+                actual: &'static str,
+                value: ::core::option::Option<#name #ty_generics>
+            ) -> Self {
+                Self {
+                    expected,
+                    actual,
+                    value,
+                }
+            }
+
+            /// Returns the name of the variant that was expected.
+            pub fn expected(&self) -> &'static str {
+                self.expected
+            }
+
+            /// Returns the name of the actual variant.
+            pub fn actual(&self) -> &'static str {
+                self.actual
+            }
+
+            /// Returns a reference to the actual value, if present.
+            pub fn value(&self) -> ::core::option::Option<&#name #ty_generics> {
+                self.value.as_ref()
+            }
+
+            /// Returns the actual value, if present.
+            pub fn into_value(self) -> ::core::option::Option<#name #ty_generics> {
+                self.value
+            }
+        }
+    );
+
+    if derive_debug {
+        let impl_debug_body = {
+            let where_clause = if let Some(where_clause) = where_clause {
+                quote!(#where_clause, #name #ty_generics: ::core::fmt::Debug)
+            } else {
+                quote!(where #name #ty_generics: ::core::fmt::Debug)
+            };
+
+            quote!(
+                impl #impl_generics ::core::fmt::Debug for #err_name #ty_generics #where_clause {
+                    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+                        f.debug_struct(stringify!(#err_name))
+                            .field("expected", &self.expected)
+                            .field("actual", &self.actual)
+                            .field("value", &self.value)
+                            .finish()
+                    }
+                }
+            )
+        };
+
+        let impl_display_body = {
+            let display_fmt = format!("expected {name}::{{}}, but got {name}::{{}}");
+            quote!(
+                impl #impl_generics ::core::fmt::Display for #err_name #ty_generics #where_clause {
+                    fn fmt(&self, formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+                        write!(
+                            formatter,
+                            #display_fmt,
+                            self.expected(),
+                            self.actual(),
+                        )
+                    }
+                }
+            )
+        };
+
+        let impl_err_body = {
+            let where_clause = if let Some(where_clause) = where_clause {
+                quote!(#where_clause, #name #ty_generics: ::core::fmt::Debug)
+            } else {
+                quote!(where #name #ty_generics: ::core::fmt::Debug)
+            };
+
+            quote!(
+                impl #impl_generics ::std::error::Error for #err_name #ty_generics #where_clause {}
+            )
+        };
+
+        err_impl.extend(quote!(
+            #impl_debug_body
+
+            #impl_display_body
+
+            #impl_err_body
+        ))
+    }
+
+    err_impl
+}
+
 /// Derive functions on an Enum for easily accessing individual items in the Enum
-#[proc_macro_derive(EnumAsInner)]
-pub fn enum_as_inner(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+#[proc_macro_derive(EnumTryAsInner, attributes(derive_err))]
+pub fn enum_try_as_inner(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     // get a usable token stream
     let ast: DeriveInput = parse_macro_input!(input as DeriveInput);
 
-    // Build the impl
-    let expanded: TokenStream = impl_all_as_fns(&ast);
+    let name = &ast.ident;
+    let err_name = Ident::new(&format!("{}Error", name), Span::call_site());
+    let generics = &ast.generics;
+    let vis = &ast.vis;
 
-    // Return the generated impl
+    let enum_data = if let syn::Data::Enum(data) = &ast.data {
+        data
+    } else {
+        panic!("{} is not an enum", name);
+    };
+
+    let mut expanded = TokenStream::new();
+
+    // Build the impl
+    let fns = impl_all_as_fns(name, &err_name, generics, enum_data);
+
+    // Build the error
+    let err = impl_err(name, &err_name, vis, generics, &ast.attrs);
+
+    expanded.extend(fns);
+    expanded.extend(err);
+
     proc_macro::TokenStream::from(expanded)
 }

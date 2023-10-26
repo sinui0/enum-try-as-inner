@@ -26,36 +26,22 @@ pub mod name_collisions {
 #[allow(unused_imports)]
 use name_collisions::*;
 
-#[derive(Debug, EnumTryAsInner)]
-enum UnitVariants {
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, EnumTryAsInner)]
+#[derive_err(Debug, PartialEq)]
+enum DeriveErr {
     Zero,
-    One,
-    Two,
+    One(u32),
+    Two(u32, i32),
 }
 
 #[test]
-fn test_zero_unit() {
-    let unit = UnitVariants::Zero;
+fn test_derive_err() {
+    let one = DeriveErr::One(1);
+    let two = DeriveErr::Two(1, 2);
 
-    assert!(unit.is_zero());
-    assert!(!unit.is_one());
-    assert!(!unit.is_two());
-}
-
-#[test]
-fn test_one_unit() {
-    let unit = UnitVariants::One;
-
-    assert!(!unit.is_zero());
-    assert!(unit.is_one());
-    assert!(!unit.is_two());
-}
-
-#[test]
-fn test_two_unit() {
-    let unit = UnitVariants::Two;
-
-    assert!(!unit.is_zero());
-    assert!(!unit.is_one());
-    assert!(unit.is_two());
+    assert_ne!(
+        one.try_into_two().unwrap_err(),
+        two.try_into_one().unwrap_err()
+    );
 }
